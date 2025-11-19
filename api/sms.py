@@ -90,7 +90,7 @@ def receive_sms():
             return ("", 200)
 
         target_type_raw = os.environ.get("MONDAY_NOTIFICATION_TARGET_TYPE", "BOARD")
-        target_type = target_type_raw.strip().upper()
+        target_type = target_type_raw.strip()  # Monday enum is case-sensitive; honour supplied value
         if not target_type:
             logging.error("MONDAY_NOTIFICATION_TARGET_TYPE resolves to empty string")
             return ("", 200)
