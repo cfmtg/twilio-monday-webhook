@@ -12,12 +12,12 @@ MONDAY_API_URL = "https://api.monday.com/v2"
 def send_notification_to_monday(user_id: int, target_id: str, target_type: str, text: str):
     """Send a notification to a specific Monday.com user."""
     query = """
-mutation ($user_id: ID!, $target_id: ID!, $target_type: NotificationTargetType!, $text: String!) {
-  create_notification(user_id: $user_id, target_id: $target_id, target_type: $target_type, text: $text) {
-    id
-  }
-}
-"""
+            mutation ($user_id: ID!, $target_id: ID!, $target_type: NotificationTargetType!, $text: String!) {
+            create_notification(user_id: $user_id, target_id: $target_id, target_type: $target_type, text: $text) {
+                id
+            }
+            }
+            """
 
     variables = {
         "user_id": str(user_id),
