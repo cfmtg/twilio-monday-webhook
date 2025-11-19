@@ -12,19 +12,25 @@ MONDAY_API_URL = "https://api.monday.com/v2"
 def send_notification_to_monday(user_id: int, text: str):
     """Send a notification to a specific Monday.com user."""
     query = """
-    mutation ($user_id: Int!, $text: String!) {
-        create_notification(user_id: $user_id, text: $text) {
-            id
-        }
+mutation ($target_id: ID!, $target_type: NotificationTargetType!, $text: String!) {
+  create_notification(target_id: $target_id, target_type: $target_type, text: $text) {
+    id
+  }
+}
+"""
+
+    variables = {
+        "target_id": str(user_id),  # Monday expects ID!, so coerce to string
+        "target_type": "USER",
+        "text": text,
     }
-    """
-    
-    variables = {"user_id": user_id, "text": text}
     # Read API key at call-time (safer for serverless imports)
     monday_api_key = os.environ.get("MONDAY_API_KEY")
     headers = {"Authorization": monday_api_key, "Content-Type": "application/json"}
 
     try:
+        # Log the outgoing variables (safe: does not include API key)
+        logging.info("Posting to Monday API with variables: %s", variables)
         response = requests.post(
             MONDAY_API_URL,
             json={"query": query, "variables": variables},
@@ -63,7 +69,7 @@ def receive_sms():
             return ("", 200)
 
         # Prepare notification
-        notification_text = f"📩 New SMS from {from_number}:\n\n{body}"
+        notification_text = f"New SMS from {from_number}:\n\n{body}"
 
         # Read MONDAY_USER_ID at request time (avoid import-time captures)
         monday_user_id = os.environ.get("MONDAY_USER_ID")
@@ -92,7 +98,7 @@ def health():
     user_present = bool(os.environ.get("MONDAY_USER_ID"))
     logging.info("MONDAY_API_KEY present at runtime: %s", api_present)
     logging.info("MONDAY_USER_ID present at runtime: %s", user_present)
-    return ("Twilio → Monday webhook running", 200)
+    return ("Twilio -> Monday webhook running", 200)
 
 
 if __name__ == "__main__":
