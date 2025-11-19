@@ -2,7 +2,7 @@
 import os
 import logging
 import re
-from typing import Optional
+from typing import List, Optional
 from flask import Flask, request
 import requests
 
@@ -52,6 +52,34 @@ def send_notification_to_monday(user_id: int, target_id: str, target_type: str, 
     except Exception as e:
         logging.error(f"Failed to send notification: {e}")
         return False
+
+
+def get_monday_user_ids() -> List[int]:
+    """Read MONDAY_USER_IDS (comma-separated) or fallback to MONDAY_USER_ID."""
+    ids_value = os.environ.get("MONDAY_USER_IDS")
+    user_ids: List[int] = []
+
+    if ids_value:
+        for raw in ids_value.split(","):
+            candidate = raw.strip()
+            if not candidate:
+                continue
+            try:
+                user_ids.append(int(candidate))
+            except ValueError:
+                logging.error("Invalid MONDAY_USER_IDS entry: %s", candidate)
+
+    if user_ids:
+        return user_ids
+
+    single_user_id = os.environ.get("MONDAY_USER_ID")
+    if single_user_id:
+        try:
+            return [int(single_user_id)]
+        except ValueError:
+            logging.error("MONDAY_USER_ID invalid: %s", single_user_id)
+
+    return []
 
 
 def normalize_phone_number(number: Optional[str]) -> str:
@@ -145,8 +173,8 @@ query ($board_id: [ID!], $limit: Int!, $column_ids: [String!]) {
 def receive_sms():
     """Receive Twilio SMS webhook (form-encoded)."""
 
-    logging.info("MONDAY_USER_ID at request time: %s", bool(os.environ.get("MONDAY_USER_ID"))) 
-    logging.info("MONDAY_USER_ID value at runtime: %r", os.environ.get("MONDAY_USER_ID"))
+    logging.info("MONDAY_USER_ID present at request time: %s", bool(os.environ.get("MONDAY_USER_ID")))
+    logging.info("MONDAY_USER_IDS present at request time: %s", bool(os.environ.get("MONDAY_USER_IDS")))
     
     try:
         # Extract from form data (Twilio uses application/x-www-form-urlencoded)
@@ -165,18 +193,6 @@ def receive_sms():
         # Prepare notification
         notification_text = f"New SMS from {sender_label}:\n\n{body}"
 
-        # Read MONDAY_USER_ID at request time (avoid import-time captures)
-        monday_user_id = os.environ.get("MONDAY_USER_ID")
-        if not monday_user_id:
-            logging.error("MONDAY_USER_ID not set in environment at runtime")
-            return ("", 200)
-
-        try:
-            user_id = int(monday_user_id)
-        except (ValueError, TypeError):
-            logging.error(f"MONDAY_USER_ID invalid: {monday_user_id}")
-            return ("", 200)
-
         target_id = os.environ.get("MONDAY_NOTIFICATION_TARGET_ID")
         if not target_id:
             logging.error("MONDAY_NOTIFICATION_TARGET_ID not set in environment at runtime")
@@ -193,7 +209,14 @@ def receive_sms():
             target_type,
         )
 
-        send_notification_to_monday(user_id, target_id, target_type, notification_text)
+        user_ids = get_monday_user_ids()
+        if not user_ids:
+            logging.error("No valid MONDAY user IDs configured (MONDAY_USER_IDS or MONDAY_USER_ID)")
+            return ("", 200)
+
+        for user_id in user_ids:
+            logging.info("Dispatching Monday notification to user %s", user_id)
+            send_notification_to_monday(user_id, target_id, target_type, notification_text)
         return ("", 200)
 
     except Exception as e:
@@ -206,11 +229,13 @@ def health():
     # Temporary debug: log presence (but never the value) of important env vars
     api_present = bool(os.environ.get("MONDAY_API_KEY"))
     user_present = bool(os.environ.get("MONDAY_USER_ID"))
+    users_present = bool(os.environ.get("MONDAY_USER_IDS"))
     target_present = bool(os.environ.get("MONDAY_NOTIFICATION_TARGET_ID"))
     board_present = bool(os.environ.get("MONDAY_CONTACT_BOARD_ID"))
     phone_column_present = bool(os.environ.get("MONDAY_PHONE_COLUMN_ID"))
     logging.info("MONDAY_API_KEY present at runtime: %s", api_present)
     logging.info("MONDAY_USER_ID present at runtime: %s", user_present)
+    logging.info("MONDAY_USER_IDS present at runtime: %s", users_present)
     logging.info("MONDAY_NOTIFICATION_TARGET_ID present at runtime: %s", target_present)
     logging.info("MONDAY_CONTACT_BOARD_ID present at runtime: %s", board_present)
     logging.info("MONDAY_PHONE_COLUMN_ID present at runtime: %s", phone_column_present)
