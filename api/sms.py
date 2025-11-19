@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.INFO)
 
 MONDAY_API_URL = "https://api.monday.com/v2"
 
-def send_notification_to_monday(user_id: int, text: str):
+def send_notification_to_monday(user_id: int, target_id: str, target_type: str, text: str):
     """Send a notification to a specific Monday.com user."""
     query = """
 mutation ($user_id: ID!, $target_id: ID!, $target_type: NotificationTargetType!, $text: String!) {
@@ -21,8 +21,8 @@ mutation ($user_id: ID!, $target_id: ID!, $target_type: NotificationTargetType!,
 
     variables = {
         "user_id": str(user_id),
-        "target_id": str(user_id),  # Monday expects ID!, so coerce to string
-        "target_type": "USER",
+        "target_id": str(target_id),
+        "target_type": target_type,
         "text": text,
     }
     # Read API key at call-time (safer for serverless imports)
@@ -84,7 +84,23 @@ def receive_sms():
             logging.error(f"MONDAY_USER_ID invalid: {monday_user_id}")
             return ("", 200)
 
-        send_notification_to_monday(user_id, notification_text)
+        target_id = os.environ.get("MONDAY_NOTIFICATION_TARGET_ID")
+        if not target_id:
+            logging.error("MONDAY_NOTIFICATION_TARGET_ID not set in environment at runtime")
+            return ("", 200)
+
+        target_type_raw = os.environ.get("MONDAY_NOTIFICATION_TARGET_TYPE", "BOARD")
+        target_type = target_type_raw.strip().upper()
+        if not target_type:
+            logging.error("MONDAY_NOTIFICATION_TARGET_TYPE resolves to empty string")
+            return ("", 200)
+        logging.info(
+            "Sending Monday notification with target_id=%s target_type=%s",
+            target_id,
+            target_type,
+        )
+
+        send_notification_to_monday(user_id, target_id, target_type, notification_text)
         return ("", 200)
 
     except Exception as e:
@@ -97,8 +113,10 @@ def health():
     # Temporary debug: log presence (but never the value) of important env vars
     api_present = bool(os.environ.get("MONDAY_API_KEY"))
     user_present = bool(os.environ.get("MONDAY_USER_ID"))
+    target_present = bool(os.environ.get("MONDAY_NOTIFICATION_TARGET_ID"))
     logging.info("MONDAY_API_KEY present at runtime: %s", api_present)
     logging.info("MONDAY_USER_ID present at runtime: %s", user_present)
+    logging.info("MONDAY_NOTIFICATION_TARGET_ID present at runtime: %s", target_present)
     return ("Twilio -> Monday webhook running", 200)
 
 
