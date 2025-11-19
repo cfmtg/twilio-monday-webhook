@@ -9,7 +9,7 @@ import sys
 from datetime import datetime
 
 # Your Vercel endpoint
-ENDPOINT_URL = "https://twilio-monday-webhook-gbmxs3p4u-breea-toomeys-projects.vercel.app/sms"
+ENDPOINT_URL = "https://twilio-monday-webhook.vercel.app/sms"
 
 # Sample test cases
 test_cases = [
