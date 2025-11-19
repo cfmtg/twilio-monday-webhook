@@ -2,7 +2,8 @@
 import os
 import logging
 import re
-from typing import List, Optional
+import html
+from typing import List, Optional, Tuple
 from flask import Flask, request
 import requests
 
@@ -92,8 +93,8 @@ def normalize_phone_number(number: Optional[str]) -> str:
     return digits
 
 
-def lookup_contact_name_by_phone(phone_number: str) -> Optional[str]:
-    """Fetch the Monday contact name matching the provided phone number."""
+def lookup_contact_by_phone(phone_number: str) -> Optional[Tuple[str, str]]:
+    """Fetch the Monday contact name and item ID matching the provided phone number."""
     normalized = normalize_phone_number(phone_number)
     if not normalized:
         logging.info("Skipping contact lookup: phone number missing/invalid")
@@ -110,21 +111,21 @@ def lookup_contact_name_by_phone(phone_number: str) -> Optional[str]:
         return None
 
     query = """
-query ($board_id: [ID!], $limit: Int!, $column_ids: [String!]) {
-  boards(ids: $board_id) {
-    items_page(limit: $limit) {
-      items {
-        id
-        name
-        column_values(ids: $column_ids) {
-          id
-          text
-        }
-      }
-    }
-  }
-}
-"""
+            query ($board_id: [ID!], $limit: Int!, $column_ids: [String!]) {
+            boards(ids: $board_id) {
+                items_page(limit: $limit) {
+                items {
+                    id
+                    name
+                    column_values(ids: $column_ids) {
+                    id
+                    text
+                    }
+                }
+                }
+            }
+            }
+            """
     variables = {
         "board_id": board_id,
         "limit": MONDAY_ITEMS_PAGE_LIMIT,
@@ -155,18 +156,60 @@ query ($board_id: [ID!], $limit: Int!, $column_ids: [String!]) {
                 for column in col_values:
                     current = normalize_phone_number(column.get("text"))
                     if current and current == normalized:
+                        name = item.get("name")
+                        item_id = item.get("id")
                         logging.info(
                             "Matched contact %s (item %s) for phone %s",
-                            item.get("name"),
-                            item.get("id"),
+                            name,
+                            item_id,
                             phone_number,
                         )
-                        return item.get("name")
+                        return name, item_id
     except Exception as exc:
         logging.exception("Contact lookup request failed: %s", exc)
 
     logging.info("No contact found on board %s for phone %s", board_id, phone_number)
     return None
+
+
+def create_update_for_item(item_id: str, sender_label: str, message: str) -> bool:
+    """Post an update to the matched contact's item so it shows up in the All Updates inbox."""
+    text_html = html.escape(message).replace("\n", "<br/>")
+    body = f"<p><strong>New SMS from {html.escape(sender_label)}</strong></p><p>{text_html}</p>"
+
+    query = """
+mutation ($item_id: ID!, $body: String!) {
+  create_update(item_id: $item_id, body: $body) {
+    id
+  }
+}
+"""
+    variables = {"item_id": item_id, "body": body}
+    monday_api_key = os.environ.get("MONDAY_API_KEY")
+    headers = {"Authorization": monday_api_key, "Content-Type": "application/json"}
+
+    try:
+        logging.info("Posting update to Monday item %s", item_id)
+        response = requests.post(
+            MONDAY_API_URL,
+            json={"query": query, "variables": variables},
+            headers=headers,
+            timeout=10,
+        )
+        data = response.json()
+        if "errors" in data:
+            logging.error("Failed to create update: %s", data["errors"])
+            return False
+
+        logging.info(
+            "Created Monday update %s for item %s",
+            data.get("data", {}).get("create_update", {}).get("id"),
+            item_id,
+        )
+        return True
+    except Exception as exc:
+        logging.exception("Error while creating Monday update: %s", exc)
+        return False
 
 
 @app.route("/sms", methods=["POST"])
@@ -187,7 +230,11 @@ def receive_sms():
             logging.warning("Missing From or Body in webhook")
             return ("", 200)
 
-        contact_name = lookup_contact_name_by_phone(from_number)
+        contact_match = lookup_contact_by_phone(from_number)
+        contact_name = contact_item_id = None
+        if contact_match:
+            contact_name, contact_item_id = contact_match
+
         sender_label = f"{contact_name} ({from_number})" if contact_name else from_number
 
         # Prepare notification
@@ -217,6 +264,11 @@ def receive_sms():
         for user_id in user_ids:
             logging.info("Dispatching Monday notification to user %s", user_id)
             send_notification_to_monday(user_id, target_id, target_type, notification_text)
+
+        if contact_item_id:
+            create_update_for_item(contact_item_id, sender_label, body)
+        else:
+            logging.info("Skipping item update; no matching contact item id for %s", from_number)
         return ("", 200)
 
     except Exception as e:
@@ -244,4 +296,3 @@ def health():
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
-
