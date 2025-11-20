@@ -13,45 +13,41 @@ logging.basicConfig(level=logging.INFO)
 MONDAY_API_URL = "https://api.monday.com/v2"
 MONDAY_ITEMS_PAGE_LIMIT = 500  # adjust if board has more than 500 rows
 
-def send_notification_to_monday(user_id: int, target_id: str, target_type: str, text: str):
-    """Send a notification to a specific Monday.com user."""
-    query = """
-            mutation ($user_id: ID!, $target_id: ID!, $target_type: NotificationTargetType!, $text: String!) {
-            create_notification(user_id: $user_id, target_id: $target_id, target_type: $target_type, text: $text) {
-                id
-            }
-            }
-            """
 
+def send_notification_to_monday(user_id: int, target_id: str, target_type: str, text: str) -> bool:
+    """Send a notification to a Monday user (fallback when no contact item)."""
+    query = """
+mutation ($user_id: ID!, $target_id: ID!, $target_type: NotificationTargetType!, $text: String!) {
+  create_notification(user_id: $user_id, target_id: $target_id, target_type: $target_type, text: $text) {
+    id
+  }
+}
+"""
     variables = {
         "user_id": str(user_id),
         "target_id": str(target_id),
         "target_type": target_type,
         "text": text,
     }
-    # Read API key at call-time (safer for serverless imports)
     monday_api_key = os.environ.get("MONDAY_API_KEY")
     headers = {"Authorization": monday_api_key, "Content-Type": "application/json"}
 
     try:
-        # Log the outgoing variables (safe: does not include API key)
-        logging.info("Posting to Monday API with variables: %s", variables)
-        response = requests.post(
+        logging.info("Posting fallback notification with variables: %s", variables)
+        resp = requests.post(
             MONDAY_API_URL,
             json={"query": query, "variables": variables},
             headers=headers,
-            timeout=10
+            timeout=10,
         )
-        response_data = response.json()
-        
-        if "errors" in response_data:
-            logging.error(f"Monday API errors: {response_data['errors']}")
+        data = resp.json()
+        if "errors" in data:
+            logging.error("Monday notification failed: %s", data["errors"])
             return False
-        
-        logging.info(f"Notification sent to user {user_id}")
+        logging.info("Notification sent to user %s", user_id)
         return True
-    except Exception as e:
-        logging.error(f"Failed to send notification: {e}")
+    except Exception as exc:
+        logging.exception("Failed to send Monday notification: %s", exc)
         return False
 
 
@@ -212,6 +208,46 @@ mutation ($item_id: ID!, $body: String!) {
         return False
 
 
+def subscribe_users_to_item(item_id: str, user_ids: List[int]) -> bool:
+    """Ensure all target users follow the contact item so updates notify them."""
+    if not user_ids:
+        return True
+
+    query = """
+mutation ($item_id: ID!, $user_ids: [ID!]) {
+  add_subscribers_to_item(item_id: $item_id, user_ids: $user_ids) {
+    id
+  }
+}
+"""
+
+    variables = {"item_id": item_id, "user_ids": [str(uid) for uid in user_ids]}
+    monday_api_key = os.environ.get("MONDAY_API_KEY")
+    headers = {"Authorization": monday_api_key, "Content-Type": "application/json"}
+
+    try:
+        logging.info(
+            "Subscribing users %s to Monday item %s",
+            variables["user_ids"],
+            item_id,
+        )
+        resp = requests.post(
+            MONDAY_API_URL,
+            json={"query": query, "variables": variables},
+            headers=headers,
+            timeout=10,
+        )
+        data = resp.json()
+        if "errors" in data:
+            logging.error("Failed to subscribe users to item: %s", data["errors"])
+            return False
+        logging.info("Subscribed users to item %s", item_id)
+        return True
+    except Exception as exc:
+        logging.exception("Error adding subscribers to item: %s", exc)
+        return False
+
+
 @app.route("/sms", methods=["POST"])
 def receive_sms():
     """Receive Twilio SMS webhook (form-encoded)."""
@@ -240,35 +276,39 @@ def receive_sms():
         # Prepare notification
         notification_text = f"New SMS from {sender_label}:\n\n{body}"
 
-        target_id = os.environ.get("MONDAY_NOTIFICATION_TARGET_ID")
-        if not target_id:
-            logging.error("MONDAY_NOTIFICATION_TARGET_ID not set in environment at runtime")
-            return ("", 200)
-
-        target_type_raw = os.environ.get("MONDAY_NOTIFICATION_TARGET_TYPE", "Project")
-        target_type = target_type_raw.strip()  # Monday enum is case-sensitive; honour supplied value
-        if not target_type:
-            logging.error("MONDAY_NOTIFICATION_TARGET_TYPE resolves to empty string")
-            return ("", 200)
-        logging.info(
-            "Sending Monday notification with target_id=%s target_type=%s",
-            target_id,
-            target_type,
-        )
-
         user_ids = get_monday_user_ids()
         if not user_ids:
             logging.error("No valid MONDAY user IDs configured (MONDAY_USER_IDS or MONDAY_USER_ID)")
             return ("", 200)
 
-        for user_id in user_ids:
-            logging.info("Dispatching Monday notification to user %s", user_id)
-            send_notification_to_monday(user_id, target_id, target_type, notification_text)
+        if not contact_item_id:
+            logging.info("No contact match for %s; sending fallback notifications", from_number)
+            fallback_target_id = os.environ.get("MONDAY_NOTIFICATION_TARGET_ID")
+            if not fallback_target_id:
+                logging.error("MONDAY_NOTIFICATION_TARGET_ID not configured for fallback notifications")
+                return ("", 200)
 
-        if contact_item_id:
-            create_update_for_item(contact_item_id, sender_label, body)
-        else:
-            logging.info("Skipping item update; no matching contact item id for %s", from_number)
+            fallback_target_type_raw = os.environ.get("MONDAY_NOTIFICATION_TARGET_TYPE", "Project")
+            fallback_target_type = fallback_target_type_raw.strip()
+            if not fallback_target_type:
+                logging.error("MONDAY_NOTIFICATION_TARGET_TYPE resolves to empty string")
+                return ("", 200)
+
+            for user_id in user_ids:
+                logging.info("Sending fallback notification to user %s", user_id)
+                send_notification_to_monday(
+                    user_id,
+                    fallback_target_id,
+                    fallback_target_type,
+                    notification_text,
+                )
+            return ("", 200)
+
+        subscribed = subscribe_users_to_item(contact_item_id, user_ids)
+        if not subscribed:
+            logging.warning("Failed to subscribe some users; continuing to post update")
+
+        create_update_for_item(contact_item_id, sender_label, body)
         return ("", 200)
 
     except Exception as e:
@@ -282,15 +322,17 @@ def health():
     api_present = bool(os.environ.get("MONDAY_API_KEY"))
     user_present = bool(os.environ.get("MONDAY_USER_ID"))
     users_present = bool(os.environ.get("MONDAY_USER_IDS"))
-    target_present = bool(os.environ.get("MONDAY_NOTIFICATION_TARGET_ID"))
     board_present = bool(os.environ.get("MONDAY_CONTACT_BOARD_ID"))
     phone_column_present = bool(os.environ.get("MONDAY_PHONE_COLUMN_ID"))
+    fallback_target_present = bool(os.environ.get("MONDAY_NOTIFICATION_TARGET_ID"))
+    fallback_type_present = bool(os.environ.get("MONDAY_NOTIFICATION_TARGET_TYPE"))
     logging.info("MONDAY_API_KEY present at runtime: %s", api_present)
     logging.info("MONDAY_USER_ID present at runtime: %s", user_present)
     logging.info("MONDAY_USER_IDS present at runtime: %s", users_present)
-    logging.info("MONDAY_NOTIFICATION_TARGET_ID present at runtime: %s", target_present)
     logging.info("MONDAY_CONTACT_BOARD_ID present at runtime: %s", board_present)
     logging.info("MONDAY_PHONE_COLUMN_ID present at runtime: %s", phone_column_present)
+    logging.info("MONDAY_NOTIFICATION_TARGET_ID present at runtime: %s", fallback_target_present)
+    logging.info("MONDAY_NOTIFICATION_TARGET_TYPE present at runtime: %s", fallback_type_present)
     return ("Twilio -> Monday webhook running", 200)
 
 
