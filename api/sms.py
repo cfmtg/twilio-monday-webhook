@@ -17,12 +17,12 @@ MONDAY_ITEMS_PAGE_LIMIT = 500  # adjust if board has more than 500 rows
 def send_notification_to_monday(user_id: int, target_id: str, target_type: str, text: str) -> bool:
     """Send a notification to a Monday user (fallback when no contact item)."""
     query = """
-mutation ($user_id: ID!, $target_id: ID!, $target_type: NotificationTargetType!, $text: String!) {
-  create_notification(user_id: $user_id, target_id: $target_id, target_type: $target_type, text: $text) {
-    id
-  }
-}
-"""
+            mutation ($user_id: ID!, $target_id: ID!, $target_type: NotificationTargetType!, $text: String!) {
+            create_notification(user_id: $user_id, target_id: $target_id, target_type: $target_type, text: $text) {
+                id
+            }
+            }
+            """
     variables = {
         "user_id": str(user_id),
         "target_id": str(target_id),
@@ -205,85 +205,6 @@ mutation ($item_id: ID!, $body: String!) {
         return None
 
 
-def subscribe_users_to_update(update_id: str, user_ids: List[int]) -> bool:
-    """Add users as subscribers to a specific update to trigger inbox notifications."""
-    if not user_ids or not update_id:
-        return True
-
-    query = """
-mutation ($update_id: ID!, $user_ids: [ID!]) {
-  add_subscribers_to_update(update_id: $update_id, user_ids: $user_ids) {
-    id
-  }
-}
-"""
-    variables = {"update_id": update_id, "user_ids": [str(uid) for uid in user_ids]}
-    monday_api_key = os.environ.get("MONDAY_API_KEY")
-    headers = {"Authorization": monday_api_key, "Content-Type": "application/json"}
-
-    try:
-        logging.info(
-            "Subscribing users %s to update %s",
-            variables["user_ids"],
-            update_id,
-        )
-        resp = requests.post(
-            MONDAY_API_URL,
-            json={"query": query, "variables": variables},
-            headers=headers,
-            timeout=10,
-        )
-        data = resp.json()
-        if "errors" in data:
-            logging.error("Failed to subscribe users to update: %s", data["errors"])
-            return False
-        logging.info("Subscribed users to update %s", update_id)
-        return True
-    except Exception as exc:
-        logging.exception("Error adding subscribers to update: %s", exc)
-        return False
-
-
-def subscribe_users_to_board(board_id: str, user_ids: List[int]) -> bool:
-    """Ensure all target users follow the Monday board so updates notify them."""
-    if not user_ids or not board_id:
-        return True
-
-    query = """
-mutation ($board_id: ID!, $user_ids: [ID!]) {
-  add_subscribers_to_board(board_id: $board_id, user_ids: $user_ids) {
-    id
-  }
-}
-"""
-
-    variables = {"board_id": board_id, "user_ids": [str(uid) for uid in user_ids]}
-    monday_api_key = os.environ.get("MONDAY_API_KEY")
-    headers = {"Authorization": monday_api_key, "Content-Type": "application/json"}
-
-    try:
-        logging.info(
-            "Subscribing users %s to Monday board %s",
-            variables["user_ids"],
-            board_id,
-        )
-        resp = requests.post(
-            MONDAY_API_URL,
-            json={"query": query, "variables": variables},
-            headers=headers,
-            timeout=10,
-        )
-        data = resp.json()
-        if "errors" in data:
-            logging.error("Failed to subscribe users to board: %s", data["errors"])
-            return False
-        logging.info("Subscribed users to board %s", board_id)
-        return True
-    except Exception as exc:
-        logging.exception("Error adding subscribers to board: %s", exc)
-        return False
-
-
 @app.route("/sms", methods=["POST"])
 def receive_sms():
     """Receive Twilio SMS webhook (form-encoded)."""
@@ -318,26 +239,10 @@ def receive_sms():
             return ("", 200)
 
         if not contact_item_id:
-            logging.info("No contact match for %s; sending fallback notifications", from_number)
-            fallback_target_id = os.environ.get("MONDAY_NOTIFICATION_TARGET_ID")
-            if not fallback_target_id:
-                logging.error("MONDAY_NOTIFICATION_TARGET_ID not configured for fallback notifications")
-                return ("", 200)
-
-            fallback_target_type_raw = os.environ.get("MONDAY_NOTIFICATION_TARGET_TYPE", "Project")
-            fallback_target_type = fallback_target_type_raw.strip()
-            if not fallback_target_type:
-                logging.error("MONDAY_NOTIFICATION_TARGET_TYPE resolves to empty string")
-                return ("", 200)
-
-            for user_id in user_ids:
-                logging.info("Sending fallback notification to user %s", user_id)
-                send_notification_to_monday(
-                    user_id,
-                    fallback_target_id,
-                    fallback_target_type,
-                    notification_text,
-                )
+            logging.info(
+                "No contact match for %s; ignoring SMS for Monday workflow",
+                from_number,
+            )
             return ("", 200)
 
         update_id = create_update_for_item(contact_item_id, sender_label, body)
@@ -345,9 +250,18 @@ def receive_sms():
             logging.error("Failed to create update for item %s", contact_item_id)
             return ("", 200)
 
-        subscribed = subscribe_users_to_update(update_id, user_ids)
-        if not subscribed:
-            logging.warning("Failed to subscribe some users to update %s", update_id)
+        for user_id in user_ids:
+            logging.info(
+                "Sending update-linked notification to user %s for update %s",
+                user_id,
+                update_id,
+            )
+            send_notification_to_monday(
+                user_id,
+                update_id,
+                "Post",
+                notification_text,
+            )
 
         return ("", 200)
 
@@ -364,15 +278,11 @@ def health():
     users_present = bool(os.environ.get("MONDAY_USER_IDS"))
     board_present = bool(os.environ.get("MONDAY_CONTACT_BOARD_ID"))
     phone_column_present = bool(os.environ.get("MONDAY_PHONE_COLUMN_ID"))
-    fallback_target_present = bool(os.environ.get("MONDAY_NOTIFICATION_TARGET_ID"))
-    fallback_type_present = bool(os.environ.get("MONDAY_NOTIFICATION_TARGET_TYPE"))
     logging.info("MONDAY_API_KEY present at runtime: %s", api_present)
     logging.info("MONDAY_USER_ID present at runtime: %s", user_present)
     logging.info("MONDAY_USER_IDS present at runtime: %s", users_present)
     logging.info("MONDAY_CONTACT_BOARD_ID present at runtime: %s", board_present)
     logging.info("MONDAY_PHONE_COLUMN_ID present at runtime: %s", phone_column_present)
-    logging.info("MONDAY_NOTIFICATION_TARGET_ID present at runtime: %s", fallback_target_present)
-    logging.info("MONDAY_NOTIFICATION_TARGET_TYPE present at runtime: %s", fallback_type_present)
     return ("Twilio -> Monday webhook running", 200)
 
 
