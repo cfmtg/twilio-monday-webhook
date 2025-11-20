@@ -168,7 +168,7 @@ def lookup_contact_by_phone(phone_number: str) -> Optional[Tuple[str, str]]:
     return None
 
 
-def create_update_for_item(item_id: str, sender_label: str, message: str) -> bool:
+def create_update_for_item(item_id: str, sender_label: str, message: str) -> Optional[str]:
     """Post an update to the matched contact's item so it shows up in the All Updates inbox."""
     text_html = html.escape(message).replace("\n", "<br/>")
     body = f"<p><strong>New SMS from {html.escape(sender_label)}</strong></p><p>{text_html}</p>"
@@ -195,41 +195,37 @@ mutation ($item_id: ID!, $body: String!) {
         data = response.json()
         if "errors" in data:
             logging.error("Failed to create update: %s", data["errors"])
-            return False
+            return None
 
-        logging.info(
-            "Created Monday update %s for item %s",
-            data.get("data", {}).get("create_update", {}).get("id"),
-            item_id,
-        )
-        return True
+        update_id = data.get("data", {}).get("create_update", {}).get("id")
+        logging.info("Created Monday update %s for item %s", update_id, item_id)
+        return update_id
     except Exception as exc:
         logging.exception("Error while creating Monday update: %s", exc)
-        return False
+        return None
 
 
-def subscribe_users_to_item(item_id: str, user_ids: List[int]) -> bool:
-    """Ensure all target users follow the contact item so updates notify them."""
-    if not user_ids:
+def subscribe_users_to_update(update_id: str, user_ids: List[int]) -> bool:
+    """Add users as subscribers to a specific update to trigger inbox notifications."""
+    if not user_ids or not update_id:
         return True
 
     query = """
-mutation ($item_id: ID!, $user_ids: [ID!]) {
-  add_subscribers_to_item(item_id: $item_id, user_ids: $user_ids) {
+mutation ($update_id: ID!, $user_ids: [ID!]) {
+  add_subscribers_to_update(update_id: $update_id, user_ids: $user_ids) {
     id
   }
 }
 """
-
-    variables = {"item_id": item_id, "user_ids": [str(uid) for uid in user_ids]}
+    variables = {"update_id": update_id, "user_ids": [str(uid) for uid in user_ids]}
     monday_api_key = os.environ.get("MONDAY_API_KEY")
     headers = {"Authorization": monday_api_key, "Content-Type": "application/json"}
 
     try:
         logging.info(
-            "Subscribing users %s to Monday item %s",
+            "Subscribing users %s to update %s",
             variables["user_ids"],
-            item_id,
+            update_id,
         )
         resp = requests.post(
             MONDAY_API_URL,
@@ -239,12 +235,52 @@ mutation ($item_id: ID!, $user_ids: [ID!]) {
         )
         data = resp.json()
         if "errors" in data:
-            logging.error("Failed to subscribe users to item: %s", data["errors"])
+            logging.error("Failed to subscribe users to update: %s", data["errors"])
             return False
-        logging.info("Subscribed users to item %s", item_id)
+        logging.info("Subscribed users to update %s", update_id)
         return True
     except Exception as exc:
-        logging.exception("Error adding subscribers to item: %s", exc)
+        logging.exception("Error adding subscribers to update: %s", exc)
+        return False
+
+
+def subscribe_users_to_board(board_id: str, user_ids: List[int]) -> bool:
+    """Ensure all target users follow the Monday board so updates notify them."""
+    if not user_ids or not board_id:
+        return True
+
+    query = """
+mutation ($board_id: ID!, $user_ids: [ID!]) {
+  add_subscribers_to_board(board_id: $board_id, user_ids: $user_ids) {
+    id
+  }
+}
+"""
+
+    variables = {"board_id": board_id, "user_ids": [str(uid) for uid in user_ids]}
+    monday_api_key = os.environ.get("MONDAY_API_KEY")
+    headers = {"Authorization": monday_api_key, "Content-Type": "application/json"}
+
+    try:
+        logging.info(
+            "Subscribing users %s to Monday board %s",
+            variables["user_ids"],
+            board_id,
+        )
+        resp = requests.post(
+            MONDAY_API_URL,
+            json={"query": query, "variables": variables},
+            headers=headers,
+            timeout=10,
+        )
+        data = resp.json()
+        if "errors" in data:
+            logging.error("Failed to subscribe users to board: %s", data["errors"])
+            return False
+        logging.info("Subscribed users to board %s", board_id)
+        return True
+    except Exception as exc:
+        logging.exception("Error adding subscribers to board: %s", exc)
         return False
 
 
@@ -304,11 +340,15 @@ def receive_sms():
                 )
             return ("", 200)
 
-        subscribed = subscribe_users_to_item(contact_item_id, user_ids)
-        if not subscribed:
-            logging.warning("Failed to subscribe some users; continuing to post update")
+        update_id = create_update_for_item(contact_item_id, sender_label, body)
+        if not update_id:
+            logging.error("Failed to create update for item %s", contact_item_id)
+            return ("", 200)
 
-        create_update_for_item(contact_item_id, sender_label, body)
+        subscribed = subscribe_users_to_update(update_id, user_ids)
+        if not subscribed:
+            logging.warning("Failed to subscribe some users to update %s", update_id)
+
         return ("", 200)
 
     except Exception as e:
